@@ -27,6 +27,8 @@
 #define CFG_SYS_SDRAM_BASE		(0x100000000ULL + SEC_IMG_SIZE)
 #define SYS_SDRAM_UPPER_LIMIT_ADDR	(0x1100000000ULL)
 
+#define VENDOR_BOOT_LOAD_ADDR		0x148000000
+#define INIT_BOOT_LOAD_ADDR		0x14a000000
 #define RAMDISK_LOAD_ADDR		0x130000000
 #define KERNEL_DTB_ADDR		0x138000000
 
@@ -197,6 +199,8 @@ const struct k3_nor_boot_target *k3_nor_get_boot_prio(unsigned int *count);
 	"kernel_comp_addr_r=" __stringify(CONFIG_SYS_LOAD_ADDR) "\0" \
 	"kernel_comp_size=" __stringify(CONFIG_FASTBOOT_BUF_SIZE) "\0" \
 	"kernel_addr_r=" __stringify(CONFIG_FASTBOOT_BUF_ADDR) "\0" \
+	"vendor_boot_comp_addr_r=" __stringify(VENDOR_BOOT_LOAD_ADDR) "\0" \
+	"init_boot_comp_addr_r=" __stringify(INIT_BOOT_LOAD_ADDR) "\0" \
 	"ramdisk_addr_r=" __stringify(RAMDISK_LOAD_ADDR) "\0" \
 	"fdt_addr_r=" __stringify(KERNEL_DTB_ADDR) "\0" \
 	"pxefile_addr_r=" __stringify(CONFIG_FASTBOOT_BUF_ADDR) "\0" \

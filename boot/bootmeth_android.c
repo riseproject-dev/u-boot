@@ -21,6 +21,7 @@
 #include <env.h>
 #include <image.h>
 #include <malloc.h>
+#include <memalign.h>
 #include <mapmem.h>
 #include <part.h>
 #include <version.h>
@@ -29,6 +30,7 @@
 #define BCB_FIELD_COMMAND_SZ 32
 #define BCB_PART_NAME "misc"
 #define BOOT_PART_NAME "boot"
+#define INIT_BOOT_PART_NAME "init_boot"
 #define VENDOR_BOOT_PART_NAME "vendor_boot"
 #define SLOT_LEN 2
 
@@ -41,12 +43,16 @@
  * @boot_mode: Requested boot mode (normal, recovery, bootloader)
  * @slot: Nul-terminated partition slot suffix read from BCB ("a\0" or "b\0")
  * @header_version: Android boot image header version
+ * @boot_img_size: Size of the boot image in bytes
+ * @init_boot_img_size: Size of the optional init boot image, or zero
+ * @vendor_boot_img_size: Size of the vendor boot image in bytes
  */
 struct android_priv {
 	enum android_boot_mode boot_mode;
 	char *slot;
 	u32 header_version;
 	u32 boot_img_size;
+	u32 init_boot_img_size;
 	u32 vendor_boot_img_size;
 };
 
@@ -161,6 +167,72 @@ static int scan_vendor_boot_part(struct udevice *blk, struct android_priv *priv)
 	return 0;
 }
 
+/**
+ * scan_init_boot_part() - Scan the init_boot[_slot] partition, if present
+ *
+ * init_boot is optional: it only exists on header_version >= 4 devices that
+ * ship the generic ramdisk separately from vendor_boot's device ramdisk. A
+ * missing partition is not an error - callers fall back to booting without
+ * it (the ramdisk must then already be present in "boot" instead).
+ */
+static int scan_init_boot_part(struct udevice *blk, struct android_priv *priv)
+{
+	struct blk_desc *desc = dev_get_uclass_plat(blk);
+	struct disk_partition partition;
+	const struct andr_boot_img_hdr_v3 *hdr;
+	char partname[PART_NAME_LEN];
+	ulong num_blks, bufsz;
+	char *buf;
+	int ret;
+
+	priv->init_boot_img_size = 0;
+
+	if (priv->slot)
+		sprintf(partname, INIT_BOOT_PART_NAME "_%s", priv->slot);
+	else
+		sprintf(partname, INIT_BOOT_PART_NAME);
+
+	ret = part_get_info_by_name(desc, partname, &partition);
+	if (ret < 0)
+		return log_msg_ret("init_boot part not found (optional)", 0);
+
+	num_blks = DIV_ROUND_UP(sizeof(struct andr_boot_img_hdr_v3), desc->blksz);
+	bufsz = num_blks * desc->blksz;
+	/* See scan_boot_part(): must be cache-line aligned for the same reason. */
+	buf = malloc_cache_aligned(bufsz);
+	if (!buf)
+		return log_msg_ret("buf", -ENOMEM);
+
+	ret = blk_read(blk, partition.start, num_blks, buf);
+	if (ret != num_blks) {
+		free(buf);
+		return log_msg_ret("part read", -EIO);
+	}
+
+	if (!is_android_boot_image_header(buf)) {
+		free(buf);
+		return log_msg_ret("header", -ENOENT);
+	}
+
+	hdr = (const struct andr_boot_img_hdr_v3 *)buf;
+	if (hdr->header_version != 4 || hdr->kernel_size || !hdr->ramdisk_size) {
+		free(buf);
+		return log_msg_ret("init_boot header", -EINVAL);
+	}
+
+	if (!android_image_get_bootimg_size(buf, &priv->init_boot_img_size)) {
+		free(buf);
+		return log_msg_ret("get init bootimg size", -EINVAL);
+	}
+
+	free(buf);
+
+	if (DIV_ROUND_UP(priv->init_boot_img_size, desc->blksz) > partition.size)
+		return log_msg_ret("init_boot size", -EINVAL);
+
+	return 0;
+}
+
 static int android_read_slot_from_bcb(struct bootflow *bflow, bool decrement)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(bflow->blk);
@@ -239,7 +311,7 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 	if (ret < 0)
 		return log_msg_ret("bcb read", ret);
 
-	priv = malloc(sizeof(struct android_priv));
+	priv = calloc(1, sizeof(*priv));
 	if (!priv)
 		return log_msg_ret("buf", -ENOMEM);
 
@@ -300,6 +372,14 @@ static int android_read_bootflow(struct udevice *dev, struct bootflow *bflow)
 		if (ret < 0) {
 			log_debug("scan vendor_boot failed: err=%d\n", ret);
 			goto free_priv;
+		}
+
+		if (priv->header_version >= 4) {
+			ret = scan_init_boot_part(bflow->blk, priv);
+			if (ret < 0) {
+				log_debug("scan init_boot failed: err=%d\n", ret);
+				goto free_priv;
+			}
 		}
 	}
 
@@ -429,7 +509,12 @@ static int run_avb_verification(struct bootflow *bflow)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(bflow->blk);
 	struct android_priv *priv = bflow->bootmeth_priv;
-	const char * const requested_partitions[] = {"boot", "vendor_boot", NULL};
+	const char * const requested_partitions[] = {
+		BOOT_PART_NAME,
+		VENDOR_BOOT_PART_NAME,
+		priv->init_boot_img_size ? INIT_BOOT_PART_NAME : NULL,
+		NULL,
+	};
 	struct AvbOps *avb_ops;
 	AvbSlotVerifyResult result;
 	AvbSlotVerifyData *out_data;
@@ -555,6 +640,7 @@ static int boot_android_normal(struct bootflow *bflow)
 	struct android_priv *priv = bflow->bootmeth_priv;
 	int ret;
 	ulong loadaddr = env_get_hex("loadaddr", 0);
+	ulong iloadaddr = env_get_hex("init_boot_comp_addr_r", 0);
 	ulong vloadaddr = env_get_hex("vendor_boot_comp_addr_r", 0);
 
 	ret = run_avb_verification(bflow);
@@ -565,6 +651,8 @@ static int boot_android_normal(struct bootflow *bflow)
 	ret = android_read_slot_from_bcb(bflow, true);
 	if (ret < 0)
 		return log_msg_ret("read slot", ret);
+
+	set_ainit_bootimg_addr(-1);
 
 	ret = read_slotted_partition(desc, "boot", priv->slot, priv->boot_img_size,
 				     loadaddr);
@@ -577,6 +665,16 @@ static int boot_android_normal(struct bootflow *bflow)
 		if (ret < 0)
 			return log_msg_ret("read vendor_boot", ret);
 		set_avendor_bootimg_addr(vloadaddr);
+
+		if (priv->header_version >= 4 && priv->init_boot_img_size) {
+			if (!iloadaddr)
+				return log_msg_ret("init_boot load address", -EINVAL);
+			ret = read_slotted_partition(desc, INIT_BOOT_PART_NAME, priv->slot,
+						     priv->init_boot_img_size, iloadaddr);
+			if (ret < 0)
+				return log_msg_ret("read init_boot", ret);
+			set_ainit_bootimg_addr(iloadaddr);
+		}
 	}
 	set_abootimg_addr(loadaddr);
 
