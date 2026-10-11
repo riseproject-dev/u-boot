@@ -489,7 +489,12 @@ static int run_avb_verification(struct bootflow *bflow)
 {
 	struct blk_desc *desc = dev_get_uclass_plat(bflow->blk);
 	struct android_priv *priv = bflow->bootmeth_priv;
-	const char * const requested_partitions[] = {"boot", "vendor_boot", NULL};
+	const char * const requested_partitions[] = {
+		BOOT_PART_NAME,
+		VENDOR_BOOT_PART_NAME,
+		priv->init_boot_img_size ? INIT_BOOT_PART_NAME : NULL,
+		NULL,
+	};
 	struct AvbOps *avb_ops;
 	AvbSlotVerifyResult result;
 	AvbSlotVerifyData *out_data;
