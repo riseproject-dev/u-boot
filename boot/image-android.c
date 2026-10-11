@@ -5,6 +5,7 @@
 
 #include <env.h>
 #include <image.h>
+#include <linux/kernel.h>
 #include <image-android-dt.h>
 #include <android_image.h>
 #include <malloc.h>
@@ -204,21 +205,37 @@ bool android_image_get_bootimg_size(const void *hdr, u32 *boot_img_size)
 
 bool android_image_get_vendor_bootimg_size(const void *hdr, u32 *vendor_boot_img_size)
 {
-	struct andr_image_data data;
+	const struct andr_vnd_boot_img_hdr *vhdr = hdr;
+	u64 size;
 
 	if (!hdr || !vendor_boot_img_size) {
 		printf("hdr or vendor_boot_img_size can't be NULL\n");
 		return false;
 	}
 
-	if (!is_android_vendor_boot_image_header(hdr)) {
+	if (!is_android_vendor_boot_image_header(hdr) ||
+	    vhdr->header_version < 3 || vhdr->header_version > 4 ||
+	    !vhdr->page_size || (vhdr->page_size & (vhdr->page_size - 1))) {
 		printf("Incorrect vendor boot image header\n");
 		return false;
 	}
 
-	android_vendor_boot_image_v3_v4_parse_hdr(hdr, &data);
+	if (vhdr->header_size < offsetof(struct andr_vnd_boot_img_hdr,
+				       vendor_ramdisk_table_size) ||
+	    (vhdr->header_version > 3 && vhdr->header_size < sizeof(*vhdr)))
+		return false;
 
-	*vendor_boot_img_size = data.vendor_boot_img_total_size;
+	size = ALIGN((u64)vhdr->header_size, vhdr->page_size);
+	size += ALIGN((u64)vhdr->vendor_ramdisk_size, vhdr->page_size);
+	size += ALIGN((u64)vhdr->dtb_size, vhdr->page_size);
+	if (vhdr->header_version > 3) {
+		size += ALIGN((u64)vhdr->vendor_ramdisk_table_size, vhdr->page_size);
+		size += ALIGN((u64)vhdr->bootconfig_size, vhdr->page_size);
+	}
+	if (size > U32_MAX)
+		return false;
+
+	*vendor_boot_img_size = size;
 
 	return true;
 }
