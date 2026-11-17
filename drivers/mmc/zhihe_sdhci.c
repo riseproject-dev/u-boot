@@ -77,16 +77,16 @@ static void sdhci_phy_1_8v_init_no_pull(struct sdhci_host *host)
 	sdhci_writeb(host, val, PHY_SDCLKDL_CNFG_R);
 
 	val = sdhci_readw(host, PHY_CMDPAD_CNFG_R);
-	sdhci_writew(host, val | 1, PHY_CMDPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 1, PHY_CMDPAD_CNFG_R);
 
 	val = sdhci_readw(host, PHY_DATAPAD_CNFG_R);
-	sdhci_writew(host, val | 1, PHY_DATAPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 1, PHY_DATAPAD_CNFG_R);
 
 	val = sdhci_readw(host, PHY_RSTNPAD_CNFG_R);
-	sdhci_writew(host, val | 1, PHY_RSTNPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 1, PHY_RSTNPAD_CNFG_R);
 
 	val = sdhci_readw(host, PHY_STBPAD_CNFG_R);
-	sdhci_writew(host, val | 1, PHY_STBPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 1, PHY_STBPAD_CNFG_R);
 
 	val = sdhci_readb(host, PHY_DLL_CTRL_R);
 	sdhci_writeb(host, val | 1, PHY_DLL_CTRL_R);
@@ -105,16 +105,16 @@ static void sdhci_phy_3_3v_init_no_pull(struct sdhci_host *host)
 	sdhci_writeb(host, val, PHY_SDCLKDL_CNFG_R);
 
 	val = sdhci_readw(host, PHY_CMDPAD_CNFG_R);
-	sdhci_writew(host, val | 2, PHY_CMDPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 2, PHY_CMDPAD_CNFG_R);
 
 	val = sdhci_readw(host, PHY_DATAPAD_CNFG_R);
-	sdhci_writew(host, val | 2, PHY_DATAPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 2, PHY_DATAPAD_CNFG_R);
 
 	val = sdhci_readw(host, PHY_RSTNPAD_CNFG_R);
-	sdhci_writew(host, val | 2, PHY_RSTNPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 2, PHY_RSTNPAD_CNFG_R);
 
 	val = sdhci_readw(host, PHY_STBPAD_CNFG_R);
-	sdhci_writew(host, val | 2, PHY_STBPAD_CNFG_R);
+	sdhci_writew(host, (val & ~0x7) | 2, PHY_STBPAD_CNFG_R);
 
 	val = sdhci_readb(host, PHY_DLL_CTRL_R);
 	sdhci_writeb(host, val | 1, PHY_DLL_CTRL_R);
@@ -123,6 +123,8 @@ static void sdhci_phy_3_3v_init_no_pull(struct sdhci_host *host)
 static void sdhci_phy_1_8v_init(struct sdhci_host *host, int delay)
 {
 	uint32_t val;
+	uint16_t clk_ctrl;
+	uint8_t dlldl = 0;
 
 	struct snps_sdhci_plat *plat = dev_get_plat(host->mmc->dev);
 	if (plat->pull_up_en == false) {
@@ -135,10 +137,9 @@ static void sdhci_phy_1_8v_init(struct sdhci_host *host, int delay)
 	//set driving force
 	sdhci_writel(host, (1 << PHY_RSTN) | (0xc << PAD_SP) | (0xc << PAD_SN), PHY_CNFG_R);
 
-	/* disable SD_CLK_EN */
-	val = sdhci_readb(host, SDHCI_CLOCK_CONTROL);
-	val &= ~SDHCI_CLOCK_CARD_EN;
-	sdhci_writeb(host, val, SDHCI_CLOCK_CONTROL);
+	/* disable SD_CLK_EN while updating delay line, preserving divider */
+	clk_ctrl = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
+	sdhci_writew(host, clk_ctrl & ~SDHCI_CLOCK_CARD_EN, SDHCI_CLOCK_CONTROL);
 	//disable delay lane
 	sdhci_writeb(host, 1 << UPDATE_DC, PHY_SDCLKDL_CNFG_R);
 	//set delay lane
@@ -148,10 +149,8 @@ static void sdhci_phy_1_8v_init(struct sdhci_host *host, int delay)
 	val = sdhci_readb(host, PHY_SDCLKDL_CNFG_R);
 	val &= ~(1 << UPDATE_DC);
 	sdhci_writeb(host, val, PHY_SDCLKDL_CNFG_R);
-	/* enable SD_CLK_EN */
-	val = sdhci_readb(host, SDHCI_CLOCK_CONTROL);
-	val |= SDHCI_CLOCK_CARD_EN;
-	sdhci_writeb(host, val, SDHCI_CLOCK_CONTROL);
+	/* restore SDHCI_CLOCK_CONTROL */
+	sdhci_writew(host, clk_ctrl, SDHCI_CLOCK_CONTROL);
 
 	/* configure phy pads */
 	val = (1 << RXSEL) | (1 << WEAKPULL_EN) | (3 << TXSLEW_CTRL_P) | (3 << TXSLEW_CTRL_N);
@@ -165,19 +164,26 @@ static void sdhci_phy_1_8v_init(struct sdhci_host *host, int delay)
 	val = (1 << RXSEL) | (2 << WEAKPULL_EN) | (3 << TXSLEW_CTRL_P) | (3 << TXSLEW_CTRL_N);
 	sdhci_writew(host, val, PHY_STBPAD_CNFG_R);
 
-	/* enable data strobe mode */
+	if (host->mmc &&
+	    (host->mmc->selected_mode == MMC_HS_400 ||
+	     host->mmc->selected_mode == MMC_HS_400_ES))
+		dlldl = 3 << SLV_INPSEL;
+
+	/* configure DLL & data strobe without clobbering SDHCI_CLOCK_CONTROL divider */
+	clk_ctrl = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
 	sdhci_writeb(host, 0, PHY_DLL_CTRL_R);
-	sdhci_writew(host, 0, SDHCI_CLOCK_CONTROL);
+	sdhci_writew(host, clk_ctrl & ~SDHCI_CLOCK_CARD_EN, SDHCI_CLOCK_CONTROL);
 	sdhci_writew(host, 0x8000, PHY_DLLBT_CNFG_R);
-	sdhci_writeb(host, 3 << SLV_INPSEL, PHY_DLLDL_CNFG_R);
+	sdhci_writeb(host, dlldl, PHY_DLLDL_CNFG_R);
 	sdhci_writeb(host, 0x25, PHY_DLL_CNFG1_R);
-	sdhci_writew(host, 0x7, SDHCI_CLOCK_CONTROL);
+	sdhci_writew(host, clk_ctrl, SDHCI_CLOCK_CONTROL);
 	sdhci_writeb(host, (1 << DLL_EN), PHY_DLL_CTRL_R);
 }
 
 static void sdhci_phy_3_3v_init(struct sdhci_host *host, int delay)
 {
 	uint32_t val;
+	uint16_t clk_ctrl;
 	struct snps_sdhci_plat *plat = dev_get_plat(host->mmc->dev);
 	if (plat->pull_up_en == false) {
 		sdhci_phy_3_3v_init_no_pull(host);
@@ -189,10 +195,9 @@ static void sdhci_phy_3_3v_init(struct sdhci_host *host, int delay)
 	//set driving force
 	sdhci_writel(host, (1 << PHY_RSTN) | (0xc << PAD_SP) | (0xc << PAD_SN), PHY_CNFG_R);
 
-	/* disable SD_CLK_EN */
-	val = sdhci_readb(host, SDHCI_CLOCK_CONTROL);
-	val &= ~SDHCI_CLOCK_CARD_EN;
-	sdhci_writeb(host, val, SDHCI_CLOCK_CONTROL);
+	/* disable SD_CLK_EN while updating delay line, preserving divider */
+	clk_ctrl = sdhci_readw(host, SDHCI_CLOCK_CONTROL);
+	sdhci_writew(host, clk_ctrl & ~SDHCI_CLOCK_CARD_EN, SDHCI_CLOCK_CONTROL);
 	//disable delay lane
 	sdhci_writeb(host, 1 << UPDATE_DC, PHY_SDCLKDL_CNFG_R);
 	//set delay lane
@@ -202,10 +207,8 @@ static void sdhci_phy_3_3v_init(struct sdhci_host *host, int delay)
 	val = sdhci_readb(host, PHY_SDCLKDL_CNFG_R);
 	val &= ~(1 << UPDATE_DC);
 	sdhci_writeb(host, val, PHY_SDCLKDL_CNFG_R);
-	/* enable SD_CLK_EN */
-	val = sdhci_readb(host, SDHCI_CLOCK_CONTROL);
-	val |= SDHCI_CLOCK_CARD_EN;
-	sdhci_writeb(host, val, SDHCI_CLOCK_CONTROL);
+	/* restore SDHCI_CLOCK_CONTROL */
+	sdhci_writew(host, clk_ctrl, SDHCI_CLOCK_CONTROL);
 
 	val = (2 << RXSEL) | (1 << WEAKPULL_EN) | (3 << TXSLEW_CTRL_P) | (3 << TXSLEW_CTRL_N);
 	sdhci_writew(host, val, PHY_CMDPAD_CNFG_R);
@@ -292,6 +295,7 @@ static void zhihe_sdhci_set_uhs_timing(struct sdhci_host *host)
 static void zhihe_sdhci_set_control_reg(struct sdhci_host *host)
 {
 	struct mmc *mmc = (struct mmc *)host->mmc;
+	struct snps_sdhci_plat *plat = dev_get_plat(host->mmc->dev);
 	u32 reg;
 
 	int delay = s_delay_lanes[mmc->selected_mode];
@@ -317,17 +321,20 @@ static void zhihe_sdhci_set_control_reg(struct sdhci_host *host)
 	zhihe_sdhci_set_voltage(host);
 	zhihe_sdhci_set_uhs_timing(host);
 
-	/* 
-	 * Phy config
-	 * 3.3v Phy: MMC_LEGACY、MMC_HS、SD_HS、MMC_HS_52、MMC_DDR_52
+	/*
+	 * Select 1.8V PHY pads (RXSEL=1) whenever the bus is fixed 1.8V I/O
+	 * (eMMC on A210), negotiated to 1.8V signaling, or in UHS/HS200/HS400.
 	 */
-	if (mmc->selected_mode <= MMC_DDR_52 ) {
-		sdhci_phy_3_3v_init(host, delay);
-	} else {
+	if (plat->io_fixed_1v8 ||
+	    mmc->signal_voltage == MMC_SIGNAL_VOLTAGE_180 ||
+	    mmc->selected_mode > MMC_DDR_52) {
 		sdhci_phy_1_8v_init(host, delay);
+	} else {
+		sdhci_phy_3_3v_init(host, delay);
 	}
 
-	if (mmc->selected_mode == MMC_HS_400) {
+	if (mmc->selected_mode == MMC_HS_400 ||
+	    mmc->selected_mode == MMC_HS_400_ES) {
 		//disable auto tuning
 		reg = sdhci_readl(host, AT_CTRL_R);
 		reg &= ~(1 << AT_EN);
@@ -622,26 +629,29 @@ static int snps_sdhci_probe(struct udevice *dev)
 	if (ret)
 		goto err;
 
+	if (dev_read_bool(dev, "pull_up"))
+		plat->pull_up_en = true;
+	if (dev_read_bool(dev, "io_fixed_1v8") ||
+	    dev_read_bool(dev, "mmc-ddr-1_8v") ||
+	    dev_read_bool(dev, "mmc-hs200-1_8v") ||
+	    dev_read_bool(dev, "mmc-hs400-1_8v"))
+		plat->io_fixed_1v8 = true;
+
 	host->voltages = MMC_VDD_33_34;
+	plat->mmc.signal_voltage = plat->io_fixed_1v8 ?
+		MMC_SIGNAL_VOLTAGE_180 : MMC_SIGNAL_VOLTAGE_330;
 	ret = sdhci_probe(dev);
 	if (ret)
 		goto err;
 
-	if (dev_read_bool(dev, "pull_up"))
-		plat->pull_up_en = true;
-	if (dev_read_bool(dev, "io_fixed_1v8"))
-		plat->io_fixed_1v8 = true;
-
 	uint16_t val = sdhci_readw(host, SDHCI_HOST_CONTROL2);
 
-	if (host->voltages == MMC_VDD_165_195) {
+	if (plat->io_fixed_1v8 || host->voltages == MMC_VDD_165_195) {
 		val |= SDHCI_CTRL_VDD_180;
 		sdhci_writew(host, val, SDHCI_HOST_CONTROL2);
 		sdhci_phy_1_8v_init(host, DELAY_LANE);
 	} else {
 		val &= ~SDHCI_CTRL_VDD_180;
-		if (plat->io_fixed_1v8)
-			val |= SDHCI_CTRL_VDD_180;
 		sdhci_writew(host, val, SDHCI_HOST_CONTROL2);
 		sdhci_phy_3_3v_init(host, DELAY_LANE);
 	}
